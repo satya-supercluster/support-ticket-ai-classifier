@@ -1,7 +1,7 @@
 # AI-Powered Ticket Classification System
 
-**Author:** [Your Name]  
-**Date:** [Current Date]  
+**Author:** Satyam Gupta  
+**Date:** [28 Nov 2025]  
 **Version:** 1.0  
 **Target Audience:** Engineering Team, DevOps, Support Operations
 
@@ -211,8 +211,8 @@ class ClassificationOutput(BaseModel):
 1. **Clone Repository**
 
 ```bash
-git clone <repository-url>
-cd ticket-classifier
+git clone https://github.com/satya-supercluster/smart-content-personalization-engine.git
+cd smart-content-personalization-engine
 ```
 
 2. **Create Virtual Environment**
@@ -1065,11 +1065,10 @@ kubectl rollout restart deployment/ticket-classifier -n production
 
 ### Primary Contact
 
-**[Your Name]**
+**Satyam Gupta**  
 
-- Email: <your.email@company.com>
-- Slack: @yourhandle
-- Teams: Your Name
+- Email: <my.email@company.com>
+- Teams: My Team
 - Available: Monday-Friday, 9 AM - 6 PM
 
 ### Team Contacts
@@ -1098,13 +1097,12 @@ kubectl rollout restart deployment/ticket-classifier -n production
 
 ### Useful Links
 
-- **GitHub Repository:** [link]
+- **GitHub Repository:** [[link](https://github.com/satya-supercluster/smart-content-personalization-engine)]
 - **Azure Portal:** [link to resource group]
 - **Application Insights:** [link]
 - **Grafana Dashboard:** [link]
 - **Azure DevOps Pipelines:** [link]
 - **Runbook:** [link to detailed runbook]
-- **Slack Channel:** #ticket-classifier
 
 ---
 
@@ -1191,8 +1189,7 @@ python -m mypy src/
 ---
 
 **Document Version:** 1.0  
-**Last Updated:** [Date]  
-**Next Review:** [Date + 3 months]
+**Last Updated:** [28 November 2025]  
 
 ---
 
@@ -1201,7 +1198,6 @@ python -m mypy src/
 This is a living document. Please submit improvements via:
 
 - Pull requests to the documentation
-- Slack #ticket-classifier channel
-- Direct message to [Your Name]
+- Direct message to Satyam Gupta
 
 Thank you for maintaining this system! 🚀
