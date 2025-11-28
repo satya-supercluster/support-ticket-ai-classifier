@@ -1,0 +1,232 @@
+# Azure DevOps CI/CD Pipeline
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - src/**
+      - tests/**
+      - requirements.txt
+      - Dockerfile
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.11'
+  dockerRegistry: 'yourregistry.azurecr.io'
+  imageName: 'ticket-classifier'
+  imageTag: '$(Build.BuildId)'
+
+stages:
+  # =======================
+  # Stage 1: Build & Test
+  # =======================
+  - stage: Build
+    displayName: 'Build and Test'
+    jobs:
+      - job: Test
+        displayName: 'Run Tests'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: 'Install dependencies'
+
+          - script: |
+              pip install pytest pytest-cov pytest-asyncio
+              pytest tests/ -v --cov=src --cov-report=xml --cov-report=html
+            displayName: 'Run pytest with coverage'
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/test-results.xml'
+              failTaskOnFailedTests: true
+            displayName: 'Publish test results'
+
+          - task: PublishCodeCoverageResults@1
+            inputs:
+              codeCoverageTool: 'Cobertura'
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/coverage.xml'
+            displayName: 'Publish code coverage'
+
+      - job: SecurityScan
+        displayName: 'Security Scanning'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              pip install bandit safety
+              bandit -r src/ -f json -o bandit-report.json
+              safety check --json
+            displayName: 'Run security scans'
+            continueOnError: true
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: 'bandit-report.json'
+              ArtifactName: 'security-reports'
+            displayName: 'Publish security reports'
+
+      - job: Lint
+        displayName: 'Code Quality'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              pip install flake8 black mypy
+              flake8 src/ --max-line-length=100 --extend-ignore=E203
+              black --check src/
+              mypy src/ --ignore-missing-imports
+            displayName: 'Run linting and type checking'
+
+  # =======================
+  # Stage 2: Build Docker Image
+  # =======================
+  - stage: BuildImage
+    displayName: 'Build Docker Image'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: Docker
+        displayName: 'Build and Push Docker Image'
+        steps:
+          - task: Docker@2
+            inputs:
+              containerRegistry: 'AzureContainerRegistry'
+              repository: '$(imageName)'
+              command: 'buildAndPush'
+              Dockerfile: 'Dockerfile'
+              tags: |
+                $(imageTag)
+                latest
+            displayName: 'Build and push Docker image'
+
+  # =======================
+  # Stage 3: Deploy to Dev
+  # =======================
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: BuildImage
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployACI
+        displayName: 'Deploy to Azure Container Instance'
+        environment: 'development'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az container create \
+                        --resource-group rg-ticket-classifier-dev \
+                        --name ticket-classifier-dev \
+                        --image $(dockerRegistry)/$(imageName):$(imageTag) \
+                        --cpu 2 \
+                        --memory 4 \
+                        --registry-login-server $(dockerRegistry) \
+                        --registry-username $(acrUsername) \
+                        --registry-password $(acrPassword) \
+                        --dns-name-label ticket-classifier-dev \
+                        --ports 8000 \
+                        --environment-variables \
+                          AZURE_OPENAI_ENDPOINT=$(azureOpenAIEndpoint) \
+                          AZURE_OPENAI_DEPLOYMENT=$(azureOpenAIDeployment) \
+                        --secure-environment-variables \
+                          AZURE_OPENAI_API_KEY=$(azureOpenAIKey) \
+                          COSMOS_ENDPOINT=$(cosmosEndpoint) \
+                          COSMOS_KEY=$(cosmosKey)
+                  displayName: 'Deploy to Azure Container Instance'
+
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "Waiting for container to be ready..."
+                      sleep 30
+                      FQDN=$(az container show --resource-group rg-ticket-classifier-dev --name ticket-classifier-dev --query ipAddress.fqdn -o tsv)
+                      curl -f http://$FQDN:8000/health || exit 1
+                  displayName: 'Health check'
+
+  # =======================
+  # Stage 4: Deploy to Production
+  # =======================
+  - stage: DeployProd
+    displayName: 'Deploy to Production'
+    dependsOn: BuildImage
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployAKS
+        displayName: 'Deploy to Azure Kubernetes Service'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: KubernetesManifest@0
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: 'AKSConnection'
+                    namespace: 'production'
+                    manifests: |
+                      deployment/k8s/deployment.yml
+                      deployment/k8s/service.yml
+                      deployment/k8s/ingress.yml
+                    containers: '$(dockerRegistry)/$(imageName):$(imageTag)'
+                  displayName: 'Deploy to AKS'
+
+                - task: Kubernetes@1
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceEndpoint: 'AKSConnection'
+                    namespace: 'production'
+                    command: 'rollout'
+                    arguments: 'status deployment/ticket-classifier'
+                  displayName: 'Check rollout status'
+
+  # =======================
+  # Stage 5: Integration Tests
+  # =======================
+  - stage: IntegrationTests
+    displayName: 'Run Integration Tests'
+    dependsOn: DeployProd
+    condition: succeeded()
+    jobs:
+      - job: TestProduction
+        displayName: 'Test Production Deployment'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              pip install requests pytest
+              pytest tests/integration/ -v --base-url=$(prodUrl)
+            displayName: 'Run integration tests'
+
+          - script: |
+              # Load testing with locust
+              pip install locust
+              locust -f tests/load/locustfile.py --headless -u 100 -r 10 --run-time 2m --host $(prodUrl)
+            displayName: 'Run load tests'
+            continueOnError: true

@@ -1,0 +1,395 @@
+# Azure Resource Manager (ARM) Template for Infrastructure as Code
+# This file defines all Azure resources needed for the ticket classifier system
+
+parameters:
+  # Environment parameters
+  - name: environment
+    type: string
+    default: dev
+    allowedValues:
+      - dev
+      - staging
+      - prod
+  
+  # Application parameters
+  - name: applicationName
+    type: string
+    default: ticket-classifier
+  
+  - name: location
+    type: string
+    default: eastus
+  
+  # Container parameters
+  - name: containerImage
+    type: string
+    default: yourregistry.azurecr.io/ticket-classifier:latest
+  
+  - name: containerCpu
+    type: int
+    default: 2
+  
+  - name: containerMemory
+    type: int
+    default: 4
+  
+  # OpenAI parameters
+  - name: openAIDeploymentName
+    type: string
+    default: gpt-4
+  
+  # Scaling parameters
+  - name: minReplicas
+    type: int
+    default: 3
+  
+  - name: maxReplicas
+    type: int
+    default: 10
+
+variables:
+  # Resource naming convention: {app}-{resource}-{env}
+  resourceGroupName: 'rg-$(parameters.applicationName)-$(parameters.environment)'
+  acrName: 'acr$(parameters.applicationName)$(parameters.environment)'
+  cosmosDbAccountName: 'cosmos-$(parameters.applicationName)-$(parameters.environment)'
+  openAIAccountName: 'openai-$(parameters.applicationName)-$(parameters.environment)'
+  appInsightsName: 'appi-$(parameters.applicationName)-$(parameters.environment)'
+  logAnalyticsName: 'log-$(parameters.applicationName)-$(parameters.environment)'
+  keyVaultName: 'kv-$(parameters.applicationName)-$(parameters.environment)'
+  
+  # For AKS deployment
+  aksClusterName: 'aks-$(parameters.applicationName)-$(parameters.environment)'
+  aksNodeResourceGroup: 'rg-$(parameters.applicationName)-$(parameters.environment)-nodes'
+  
+  # For ACI deployment (development)
+  aciName: 'aci-$(parameters.applicationName)-$(parameters.environment)'
+  
+  # Tags
+  tags:
+    Environment: $(parameters.environment)
+    Application: $(parameters.applicationName)
+    ManagedBy: Azure DevOps
+
+---
+# Azure Container Registry
+apiVersion: Microsoft.ContainerRegistry/registries@2023-01-01-preview
+type: Microsoft.ContainerRegistry/registries
+name: $(variables.acrName)
+location: $(parameters.location)
+sku:
+  name: Standard
+tags: $(variables.tags)
+properties:
+  adminUserEnabled: true
+  publicNetworkAccess: Enabled
+
+---
+# Azure Cosmos DB Account
+apiVersion: Microsoft.DocumentDB/databaseAccounts@2023-04-15
+type: Microsoft.DocumentDB/databaseAccounts
+name: $(variables.cosmosDbAccountName)
+location: $(parameters.location)
+tags: $(variables.tags)
+kind: GlobalDocumentDB
+properties:
+  databaseAccountOfferType: Standard
+  consistencyPolicy:
+    defaultConsistencyLevel: Session
+  locations:
+    - locationName: $(parameters.location)
+      failoverPriority: 0
+      isZoneRedundant: false
+  capabilities:
+    - name: EnableServerless
+  backupPolicy:
+    type: Continuous
+    continuousModeProperties:
+      tier: Continuous7Days
+
+---
+# Cosmos DB Database
+apiVersion: Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2023-04-15
+type: Microsoft.DocumentDB/databaseAccounts/sqlDatabases
+name: $(variables.cosmosDbAccountName)/ticketdb
+dependsOn:
+  - $(variables.cosmosDbAccountName)
+properties:
+  resource:
+    id: ticketdb
+
+---
+# Cosmos DB Container
+apiVersion: Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2023-04-15
+type: Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers
+name: $(variables.cosmosDbAccountName)/ticketdb/classifications
+dependsOn:
+  - $(variables.cosmosDbAccountName)/ticketdb
+properties:
+  resource:
+    id: classifications
+    partitionKey:
+      paths:
+        - /ticket_id
+      kind: Hash
+    indexingPolicy:
+      indexingMode: consistent
+      automatic: true
+      includedPaths:
+        - path: /*
+      excludedPaths:
+        - path: /_etag/?
+
+---
+# Azure Cognitive Services (OpenAI)
+apiVersion: Microsoft.CognitiveServices/accounts@2023-05-01
+type: Microsoft.CognitiveServices/accounts
+name: $(variables.openAIAccountName)
+location: $(parameters.location)
+tags: $(variables.tags)
+sku:
+  name: S0
+kind: OpenAI
+properties:
+  customSubDomainName: $(variables.openAIAccountName)
+  publicNetworkAccess: Enabled
+  networkAcls:
+    defaultAction: Allow
+
+---
+# OpenAI Model Deployment
+apiVersion: Microsoft.CognitiveServices/accounts/deployments@2023-05-01
+type: Microsoft.CognitiveServices/accounts/deployments
+name: $(variables.openAIAccountName)/$(parameters.openAIDeploymentName)
+dependsOn:
+  - $(variables.openAIAccountName)
+sku:
+  name: Standard
+  capacity: 10
+properties:
+  model:
+    format: OpenAI
+    name: gpt-4
+    version: '0613'
+
+---
+# Log Analytics Workspace
+apiVersion: Microsoft.OperationalInsights/workspaces@2022-10-01
+type: Microsoft.OperationalInsights/workspaces
+name: $(variables.logAnalyticsName)
+location: $(parameters.location)
+tags: $(variables.tags)
+properties:
+  sku:
+    name: PerGB2018
+  retentionInDays: 30
+  features:
+    enableLogAccessUsingOnlyResourcePermissions: true
+
+---
+# Application Insights
+apiVersion: Microsoft.Insights/components@2020-02-02
+type: Microsoft.Insights/components
+name: $(variables.appInsightsName)
+location: $(parameters.location)
+tags: $(variables.tags)
+kind: web
+properties:
+  Application_Type: web
+  WorkspaceResourceId: $(variables.logAnalyticsName)
+  Flow_Type: Bluefield
+  Request_Source: rest
+
+---
+# Azure Key Vault
+apiVersion: Microsoft.KeyVault/vaults@2023-02-01
+type: Microsoft.KeyVault/vaults
+name: $(variables.keyVaultName)
+location: $(parameters.location)
+tags: $(variables.tags)
+properties:
+  sku:
+    family: A
+    name: standard
+  tenantId: $(subscription().tenantId)
+  enabledForDeployment: true
+  enabledForTemplateDeployment: true
+  enableRbacAuthorization: true
+  accessPolicies: []
+
+---
+# Key Vault Secrets - OpenAI API Key
+apiVersion: Microsoft.KeyVault/vaults/secrets@2023-02-01
+type: Microsoft.KeyVault/vaults/secrets
+name: $(variables.keyVaultName)/openai-api-key
+dependsOn:
+  - $(variables.keyVaultName)
+  - $(variables.openAIAccountName)
+properties:
+  value: $(listKeys(resourceId('Microsoft.CognitiveServices/accounts', variables.openAIAccountName), '2023-05-01').key1)
+
+---
+# Key Vault Secrets - Cosmos DB Key
+apiVersion: Microsoft.KeyVault/vaults/secrets@2023-02-01
+type: Microsoft.KeyVault/vaults/secrets
+name: $(variables.keyVaultName)/cosmos-key
+dependsOn:
+  - $(variables.keyVaultName)
+  - $(variables.cosmosDbAccountName)
+properties:
+  value: $(listKeys(resourceId('Microsoft.DocumentDB/databaseAccounts', variables.cosmosDbAccountName), '2023-04-15').primaryMasterKey)
+
+---
+# Azure Kubernetes Service (Production)
+# Only deployed for staging and prod environments
+condition: or(equals(parameters('environment'), 'staging'), equals(parameters('environment'), 'prod'))
+apiVersion: Microsoft.ContainerService/managedClusters@2023-06-01
+type: Microsoft.ContainerService/managedClusters
+name: $(variables.aksClusterName)
+location: $(parameters.location)
+tags: $(variables.tags)
+identity:
+  type: SystemAssigned
+sku:
+  name: Base
+  tier: Standard
+properties:
+  dnsPrefix: $(variables.aksClusterName)
+  kubernetesVersion: '1.27.7'
+  enableRBAC: true
+  
+  agentPoolProfiles:
+    - name: nodepool1
+      count: 3
+      vmSize: Standard_D4s_v3
+      osType: Linux
+      mode: System
+      enableAutoScaling: true
+      minCount: 3
+      maxCount: 10
+      availabilityZones:
+        - '1'
+        - '2'
+        - '3'
+  
+  networkProfile:
+    networkPlugin: azure
+    networkPolicy: azure
+    serviceCidr: 10.0.0.0/16
+    dnsServiceIP: 10.0.0.10
+    loadBalancerSku: standard
+  
+  addonProfiles:
+    azureKeyvaultSecretsProvider:
+      enabled: true
+    omsagent:
+      enabled: true
+      config:
+        logAnalyticsWorkspaceResourceID: $(variables.logAnalyticsName)
+    azurepolicy:
+      enabled: true
+
+---
+# AKS Managed Identity Role Assignment - ACR Pull
+condition: or(equals(parameters('environment'), 'staging'), equals(parameters('environment'), 'prod'))
+apiVersion: Microsoft.Authorization/roleAssignments@2022-04-01
+type: Microsoft.Authorization/roleAssignments
+name: guid($(variables.aksClusterName), 'acrpull')
+scope: $(variables.acrName)
+dependsOn:
+  - $(variables.aksClusterName)
+  - $(variables.acrName)
+properties:
+  roleDefinitionId: $(subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d'))
+  principalId: $(reference(resourceId('Microsoft.ContainerService/managedClusters', variables.aksClusterName)).identityProfile.kubeletidentity.objectId)
+  principalType: ServicePrincipal
+
+---
+# Azure Container Instance (Development)
+# Only deployed for dev environment
+condition: equals(parameters('environment'), 'dev')
+apiVersion: Microsoft.ContainerInstance/containerGroups@2023-05-01
+type: Microsoft.ContainerInstance/containerGroups
+name: $(variables.aciName)
+location: $(parameters.location)
+tags: $(variables.tags)
+properties:
+  containers:
+    - name: $(parameters.applicationName)
+      properties:
+        image: $(parameters.containerImage)
+        resources:
+          requests:
+            cpu: $(parameters.containerCpu)
+            memoryInGB: $(parameters.containerMemory)
+        ports:
+          - port: 8000
+            protocol: TCP
+        environmentVariables:
+          - name: AZURE_OPENAI_ENDPOINT
+            value: $(reference(resourceId('Microsoft.CognitiveServices/accounts', variables.openAIAccountName)).endpoint)
+          - name: AZURE_OPENAI_DEPLOYMENT
+            value: $(parameters.openAIDeploymentName)
+          - name: COSMOS_ENDPOINT
+            value: $(reference(resourceId('Microsoft.DocumentDB/databaseAccounts', variables.cosmosDbAccountName)).documentEndpoint)
+          - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+            value: $(reference(resourceId('Microsoft.Insights/components', variables.appInsightsName)).ConnectionString)
+          - name: LOG_LEVEL
+            value: INFO
+          - name: AZURE_OPENAI_API_KEY
+            secureValue: $(listKeys(resourceId('Microsoft.CognitiveServices/accounts', variables.openAIAccountName), '2023-05-01').key1)
+          - name: COSMOS_KEY
+            secureValue: $(listKeys(resourceId('Microsoft.DocumentDB/databaseAccounts', variables.cosmosDbAccountName), '2023-04-15').primaryMasterKey)
+  
+  osType: Linux
+  restartPolicy: Always
+  
+  ipAddress:
+    type: Public
+    ports:
+      - port: 8000
+        protocol: TCP
+    dnsNameLabel: $(variables.aciName)
+  
+  imageRegistryCredentials:
+    - server: $(reference(resourceId('Microsoft.ContainerRegistry/registries', variables.acrName)).loginServer)
+      username: $(variables.acrName)
+      password: $(listCredentials(resourceId('Microsoft.ContainerRegistry/registries', variables.acrName), '2023-01-01-preview').passwords[0].value)
+
+---
+# Outputs
+outputs:
+  acrLoginServer:
+    type: string
+    value: $(reference(resourceId('Microsoft.ContainerRegistry/registries', variables.acrName)).loginServer)
+  
+  cosmosDbEndpoint:
+    type: string
+    value: $(reference(resourceId('Microsoft.DocumentDB/databaseAccounts', variables.cosmosDbAccountName)).documentEndpoint)
+  
+  openAIEndpoint:
+    type: string
+    value: $(reference(resourceId('Microsoft.CognitiveServices/accounts', variables.openAIAccountName)).endpoint)
+  
+  appInsightsConnectionString:
+    type: string
+    value: $(reference(resourceId('Microsoft.Insights/components', variables.appInsightsName)).ConnectionString)
+  
+  keyVaultUri:
+    type: string
+    value: $(reference(resourceId('Microsoft.KeyVault/vaults', variables.keyVaultName)).vaultUri)
+  
+  # Conditional outputs
+  aksClusterName:
+    type: string
+    condition: or(equals(parameters('environment'), 'staging'), equals(parameters('environment'), 'prod'))
+    value: $(variables.aksClusterName)
+  
+  aksFqdn:
+    type: string
+    condition: or(equals(parameters('environment'), 'staging'), equals(parameters('environment'), 'prod'))
+    value: $(reference(resourceId('Microsoft.ContainerService/managedClusters', variables.aksClusterName)).fqdn)
+  
+  aciEndpoint:
+    type: string
+    condition: equals(parameters('environment'), 'dev')
+    value: http://$(reference(resourceId('Microsoft.ContainerInstance/containerGroups', variables.aciName)).ipAddress.fqdn):8000

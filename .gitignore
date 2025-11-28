@@ -1,0 +1,108 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+
+# Virtual environment
+venv/
+.env/
+.env.*
+*.env
+
+# ==========================
+# VS Code
+# ==========================
+.vscode/
+.code-workspace
+
+
+# ==========================
+# OS / Editor files
+# ==========================
+.DS_Store
+Thumbs.db
+
+
+# ==========================
+# Logs
+# ==========================
+*.log
+logs/
+
+
+# ==========================
+# Pytest & Coverage
+# ==========================
+.cache/
+cover/
+htmlcov/
+coverage.xml
+*.coverage
+
+
+# ==========================
+# Jupyter / Notebooks
+# ==========================
+.ipynb_checkpoints/
+
+
+# ==========================
+# Build Artifacts
+# ==========================
+build/
+dist/
+*.egg-info/
+*.spec
+
+
+# ==========================
+# FastAPI / Uvicorn
+# ==========================
+instance/
+*.db
+
+
+# ==========================
+# Docker
+# ==========================
+docker-compose.override.yml
+**/.dockerignore
+**/Dockerfile.*~
+*.tar
+
+
+# ==========================
+# Kubernetes
+# ==========================
+deployment/k8s/secret.yml.template
+deployment/k8s/*.template    # secrets templates
+secrets/                     # if any
+
+
+# ==========================
+# Azure / Cloud Config
+# ==========================
+azure-pipelines.yml.user
+*.azure
+*.azureconfig
+*.pubxml
+
+
+# ==========================
+# Images / Binary Assets
+# ==========================
+# *.png
+# *.jpg
+# *.jpeg
+# *.svg
+
+
+# ==========================
+# Generated Documentation
+# ==========================
+site/
+docs/generated/

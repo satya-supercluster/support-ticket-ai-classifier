@@ -1,0 +1,460 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  PYTHON_VERSION: '3.11'
+  DOCKER_REGISTRY: 'yourregistry.azurecr.io'
+  IMAGE_NAME: 'ticket-classifier'
+
+jobs:
+  # =====================
+  # Job 1: Code Quality
+  # =====================
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 black mypy bandit safety
+
+      - name: Run Flake8 linting
+        run: |
+          flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src/ --count --max-complexity=10 --max-line-length=100 --statistics
+        continue-on-error: false
+
+      - name: Check code formatting with Black
+        run: |
+          black --check src/
+
+      - name: Run type checking with MyPy
+        run: |
+          mypy src/ --ignore-missing-imports
+        continue-on-error: true
+
+      - name: Security scan with Bandit
+        run: |
+          bandit -r src/ -f json -o bandit-report.json
+        continue-on-error: true
+
+      - name: Check dependencies with Safety
+        run: |
+          safety check --json
+        continue-on-error: true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: bandit-report.json
+
+  # =====================
+  # Job 2: Run Tests
+  # =====================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio pytest-mock
+
+      - name: Run pytest with coverage
+        run: |
+          pytest tests/ -v \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term-missing \
+            --junitxml=junit/test-results.xml
+        env:
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_DEPLOYMENT: gpt-4
+          COSMOS_ENDPOINT: ${{ secrets.COSMOS_ENDPOINT }}
+          COSMOS_KEY: ${{ secrets.COSMOS_KEY }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: junit/test-results.xml
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+      - name: Check coverage threshold
+        run: |
+          coverage report --fail-under=80
+
+  # =====================
+  # Job 3: Build Docker Image
+  # =====================
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # =====================
+  # Job 4: Deploy to Development
+  # =====================
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment:
+      name: development
+      url: https://ticket-classifier-dev.azurecontainer.io
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Container Instance
+        uses: azure/aci-deploy@v1
+        with:
+          resource-group: rg-ticket-classifier-dev
+          dns-name-label: ticket-classifier-dev
+          image: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:develop
+          registry-login-server: ${{ env.DOCKER_REGISTRY }}
+          registry-username: ${{ secrets.ACR_USERNAME }}
+          registry-password: ${{ secrets.ACR_PASSWORD }}
+          name: ticket-classifier-dev
+          location: 'eastus'
+          cpu: 2
+          memory: 4
+          ports: 8000
+          environment-variables: |
+            AZURE_OPENAI_ENDPOINT=${{ secrets.AZURE_OPENAI_ENDPOINT }}
+            AZURE_OPENAI_DEPLOYMENT=gpt-4
+            LOG_LEVEL=INFO
+          secure-environment-variables: |
+            AZURE_OPENAI_API_KEY=${{ secrets.AZURE_OPENAI_API_KEY }}
+            COSMOS_ENDPOINT=${{ secrets.COSMOS_ENDPOINT }}
+            COSMOS_KEY=${{ secrets.COSMOS_KEY }}
+
+      - name: Wait for deployment
+        run: sleep 30
+
+      - name: Health check
+        run: |
+          FQDN="ticket-classifier-dev.eastus.azurecontainer.io"
+          MAX_ATTEMPTS=10
+          ATTEMPT=1
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "Health check attempt $ATTEMPT of $MAX_ATTEMPTS"
+            if curl -f http://$FQDN:8000/health; then
+              echo "✅ Health check passed!"
+              exit 0
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 10
+          done
+          
+          echo "❌ Health check failed after $MAX_ATTEMPTS attempts"
+          exit 1
+
+      - name: Run smoke tests
+        run: |
+          FQDN="ticket-classifier-dev.eastus.azurecontainer.io"
+          
+          # Test classify endpoint
+          curl -X POST http://$FQDN:8000/classify \
+            -H "Content-Type: application/json" \
+            -d '{
+              "subject": "Test ticket",
+              "description": "This is a test",
+              "customer_email": "test@example.com",
+              "source": "api"
+            }' \
+            -f -s | jq .
+          
+          echo "✅ Smoke tests passed!"
+
+  # =====================
+  # Job 5: Deploy to Production
+  # =====================
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+      url: https://api.ticket-classifier.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group rg-ticket-classifier-prod \
+            --name aks-ticket-classifier-prod \
+            --overwrite-existing
+
+      - name: Update image tag in manifests
+        run: |
+          sed -i "s|image:.*|image: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:main|g" \
+            deployment/k8s/deployment.yml
+
+      - name: Deploy to AKS
+        run: |
+          kubectl apply -f deployment/k8s/deployment.yml
+          kubectl apply -f deployment/k8s/service.yml
+          kubectl apply -f deployment/k8s/ingress.yml
+          kubectl apply -f deployment/k8s/hpa.yml
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/ticket-classifier -n production --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n production -l app=ticket-classifier
+          kubectl get service -n production ticket-classifier-service
+
+      - name: Health check production
+        run: |
+          INGRESS_IP=$(kubectl get ingress ticket-classifier-ingress -n production -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "Ingress IP: $INGRESS_IP"
+          
+          # Wait for ingress to be ready
+          sleep 30
+          
+          # Health check
+          curl -f http://$INGRESS_IP/health || echo "Warning: Health check failed"
+
+  # =====================
+  # Job 6: Integration Tests (Production)
+  # =====================
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-prod
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest requests
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ -v --base-url=${{ secrets.PROD_URL }}
+        env:
+          PROD_URL: https://api.ticket-classifier.example.com
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: integration-test-results
+          path: junit/integration-test-results.xml
+
+  # =====================
+  # Job 7: Performance Testing
+  # =====================
+  performance-test:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: deploy-prod
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install locust
+        run: |
+          pip install locust
+
+      - name: Run load tests
+        run: |
+          locust -f tests/load/locustfile.py \
+            --headless \
+            --users 100 \
+            --spawn-rate 10 \
+            --run-time 2m \
+            --host ${{ secrets.PROD_URL }} \
+            --html load-test-report.html
+        continue-on-error: true
+
+      - name: Upload load test report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: load-test-report
+          path: load-test-report.html
+
+  # =====================
+  # Job 8: Notify on Failure
+  # =====================
+  notify:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [code-quality, test, build, deploy-prod]
+    if: failure()
+    
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "❌ CI/CD Pipeline Failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *CI/CD Pipeline Failed*\n*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Author:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
